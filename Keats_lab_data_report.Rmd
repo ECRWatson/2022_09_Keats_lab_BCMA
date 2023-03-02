@@ -1,0 +1,182 @@
+---
+title: "Exploring Keats Lab HMCL for a BCMA gene set"
+author: "Ed Watson"
+date: "2022-09-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, error = FALSE, warning = FALSE)
+```
+
+## 1. Rationale
+
+To my surprise, it appears that not much is understood about BCMA's regulation. I thought I would use the Keat's lab HMCL repository to at least look for a gene set that associates with BCMA expression at the RNA level, and try and understand how BCMA expression is altered according to known chromosomal rearrangements.
+
+---
+
+## 2. Tidying the data
+
+I have already downloaded the Keats counts data, available at this [link](https://drive.google.com/file/d/0B5NIAQJWm6R3NzQ0VGxpTzE2MFE/view?usp=sharing&resourcekey=0-HCwkAvUc5M0D-lJmeTr4ow), and manually corrected the matrix by removing spaces that appeared. (I will need to look into this should I want to make a reproducible workflow.) I have called this file "HMCL_mRNA.txt". It comprises count data on 65 different HCMLs (66 include one duplicate) (columns) and nearly 52,000 gene / gene segments (rows). 
+
+I have also downloaded the HCML General Characteristics file, available [here](https://www.keatslab.org/myeloma-cell-lines/hmcl-characteristics). I have called this file "meta_data.xlsx". It lists those same 66 cell lines (plus more) (rows) and various characteristics (e.g. ethnic origin of patient line derived from; presence of canonical rearranegements).
+
+The first step is to tidy the data, so that only the cell lines listed in the counts matrix are included in the meta data file. 
+
+```{r, echo = TRUE}
+source("code_for_tidying_data.R")
+```
+
+---
+
+## 3. Applying edgeR package
+
+Simply because I hear the name bandied around so much, I first looked at DESeq2 to help me with this mini-project. Unfortunately, DESeq2 requires there to be technical replicates in the matrix at the start of the workflow, whereas the Keats lab data does not include replicates. After reading around, edgeR seemed like a sensible alternative - but note that while the lack of technical replicates doesn't preclude proceeding down the edgeR pipeline, it is certainly not advisable for anything beyond exploratory data.
+
+### 3.1. First iteration of analysis
+
+I had very vaguely assumed I could simply obtain normalised expression counts for each cell line, and then somehow see which genes are consistently co-expressed with BCMA. It may be that I am able to do this, but my first (second, third and probably fourth!) read of the edgeR documentation emphasises the idea of pairwise comparisons (a la, one group treated and another group not treated), and applying a grouping to the dataset. 
+
+One portion of the User Guide (section 4.3 Profiles of Yoruba HapMap individuals) references a counts matrix that may well have originally had technical replicates, but offers just one read per sample; i.e. the counts matrix looks similar to the one from the Keats' data. I am using this as my template for my first analysis, to help me familiarise myself with how edgeR works.
+
+In the Yoruba example, each individual is grouped according to gender. I shall group my cell lines according to their translocation status - specifically, whether the cell line harbours t(14;16) (semi-arbitrarily chosen - BCMA resides onf chromosome 16!).
+
+
+```{r, echo = TRUE}
+library(edgeR)
+
+# First, we define our grouping and then convert the counts matrix into a DGEList object. We can also incorporate gene annotation here. (Note that for the grouping, 0 = no t(14;16), 1 = t(14;16) is present.)
+annot <- mRNA1$GENE_NAME
+t1416 <- md_tibble$`t(14;16)` 
+hmcl <- DGEList(counts = mRNA, group = t1416, genes = annot)
+
+# Then, we use filtering to remove genes with counts < 10 across all 65 cell lines.
+keep <- filterByExpr(hmcl)
+hmcl <- hmcl[keep, , keep.lib.sizes = FALSE]
+
+# We can then normalise the counts.
+hmcl <- calcNormFactors(hmcl)
+```
+
+We are interested in the differences between t(14;16) present and absent; hence, we create a design matrix using the t(14;16) factor, and we estimate the negative binomial dispersion using the `estimateDisp` function. The truth is that I don't really know what this is all about. Dispersion is a measure of variance (or in some way, is related to variance), and I think that dispersion plots are a sort of quality check. But I have no idea how these plots perform.
+
+```{r, echo = TRUE}
+library(statmod) # Not automatically loaded with edgeR, but appears to be required
+
+# Estimating the negative binomial dispersion
+design <- model.matrix(~t1416)
+hmcl <- estimateDisp(hmcl, design, robust = TRUE)
+plotBCV(hmcl)
+```
+
+We can then estimate the QL dispersions around the dispersion trend, using `glmQLFit`. 
+
+```{r, echo = TRUE}
+fit <- glmQLFit(hmcl, design, robust = TRUE)
+plotQLDisp(fit)
+```
+
+Finally, we can assess differential expression between those lines with and without the mutation.
+
+```{r, echo = TRUE}
+qlf <- glmQLFTest(fit)
+topTags(qlf, n = 20)
+```
+
+Clearly, BCMA is not amongst the top twenty differentially expressed genes. In fact, these are its data:
+
+```{r}
+qlf$table["ENSG00000048462",]
+```
+
+It looks like there is basically no difference in expression between the two different translocation states. 
+
+Let's try again, but this time, look at t(16;22) translocations.
+
+
+```{r, echo = TRUE}
+annot <- mRNA1$GENE_NAME
+t1622 <- md_tibble$`t(16;22)` 
+hmcl <- DGEList(counts = mRNA, group = t1622, genes = annot)
+
+keep <- filterByExpr(hmcl)
+hmcl <- hmcl[keep, , keep.lib.sizes = FALSE]
+
+hmcl <- calcNormFactors(hmcl)
+```
+
+Firstly, the negative binomial dispersion:
+
+```{r}
+design1 <- model.matrix(~t1622)
+hmcl <- estimateDisp(hmcl, design1, robust = TRUE)
+plotBCV(hmcl)
+
+```
+
+Then the QL dispersion:
+
+```{r}
+fit <- glmQLFit(hmcl, design1, robust = TRUE)
+plotQLDisp(fit)
+```
+
+These are the top 20 differentially-expressed genes:
+
+```{r, echo = TRUE}
+qlf <- glmQLFTest(fit)
+topTags(qlf, n = 20)
+```
+
+And this is where BCMA sits in this model:
+
+```{r}
+qlf$table["ENSG00000048462",]
+```
+
+Equally insignificant - albeit with the massive caveats that:
+
+1. I don't know if I can use this pipeline in this way (??dispersions)
+2. I don't fully understand the model that is being tested here.
+
+---
+
+## 3.2. A different approach
+
+The original question I had for this data analysis project was: what genes are strongly associated with BCMA expression? I tried to answer it by applying the edgeR package, because I thought a published method would be the best way of doing things. This may be true, but edgeR is about differential expression - e.g. between diease and not-disease, or treated and un-treated - and that is NOT the flavour of question I am trying to answer.
+
+If I break down the question into its logical constituents:
+
+1. I have 65 different values for BCMA expression (one per cell line)
+2. Linked to each of these 65 BCMA values are some 52,000 other gene expression values
+3. I would like to find those genes whose expression values correlates (negatively or positively) with BCMA
+
+Basically, I would like to perform correlative analysis. Having googled this, it seems the buzz-phrase is "gene co-expression analysis", and [here](https://academic.oup.com/bib/article/19/4/575/2888441) is a potentially useful review.
+
+Before I even engage in this, let's take it back to the origin of this whole exploration: I was simply hoping to determine which cell lines to use for the DPhil (then I got distracted by a link between translocations and BCMA, then I got distracted by regulation of BCMA expression). For example, it may be useful to compare a high BCMA expressor with a low BCMA expressor.
+
+Let's try and answer the simple question: how much BCMA do the different cell lines express?
+
+Here's my approach.
+
+```{r}
+# Convert the hmcl$counts matrix into a tibble (ensuring we don't lose the gene names)
+df <- data.frame(rownames(hmcl$counts), hmcl$counts)
+df_tibble <- as_tibble(df)
+
+# Find just BCMA expression and pivot_longer
+bcma_only <- filter(df_tibble, rownames.hmcl.counts. == "ENSG00000048462")
+bcma_only <- pivot_longer(bcma_only, cols = 2:66, names_to = "cell_lines", values_to = "gene_expression")
+
+# Pull out the normalisation factors
+norms <- as_tibble(hmcl$samples)[,3]
+
+# Join the normalisation factor and bcma_only tables
+bcma_only <- as_tibble(data.frame(bcma_only, norms))
+
+# Create a column of normalised BCMA expression
+bcma_only <- bcma_only %>% mutate(norm_gene_exp = gene_expression * norm.factors)
+
+# Plot this
+ggplot(bcma_only, mapping = aes(y = cell_lines, x = norm_gene_exp))+ geom_col() + scale_y_discrete(limits = bcma_only$cell_lines)
+```
